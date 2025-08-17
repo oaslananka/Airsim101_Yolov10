@@ -3,12 +3,13 @@ import airsim
 import numpy as np
 import cv2
 from ultralytics import YOLO
+from utils.robust_image import get_image_safe
 
 model = YOLO("yolov10n.pt")
 
 def yolov10_object_detection(client) -> bool:
     """
-    Perform object detection using YOLOv10 model.
+    Perform object detection using YOLOv10 model with robust image retrieval.
 
     Args:
         client: The AirSim client object.
@@ -16,9 +17,11 @@ def yolov10_object_detection(client) -> bool:
     Returns:
         bool: True if the detection is successful, False otherwise.
     """
-    result = client.simGetImage("FrontCenter", airsim.ImageType.Scene)
-    raw_image = np.frombuffer(result, np.int8)
-    img = cv2.imdecode(raw_image, cv2.IMREAD_UNCHANGED)
+    # Use robust image retrieval instead of direct simGetImage call
+    img = get_image_safe(client, camera="0", retries=3, sleep=0.2, compress=True)
+    
+    if img is None:
+        return True  # Continue operation even if image retrieval fails
     
     if img.shape[2] == 4:
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)

@@ -1,0 +1,50 @@
+{
+  "SeeDocsAt": "https://github.com/Microsoft/AirSim/blob/main/docs/settings.md",
+  "SettingsVersion": 1.2,
+  "SimMode": "Car",
+  "ClockSpeed": 1,
+  "Vehicles": {
+    "PhysXCar": {
+      "VehicleType": "PhysXCar",
+      "X": 4, "Y": 0, "Z": -2,
+      "Pitch": 0, "Roll": 0, "Yaw": 0,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90,
+              "AutoExposureSpeed": 100,
+              "MotionBlurAmount": 0
+            }
+          ],
+          "X": 0.50, "Y": 0.00, "Z": -0.30,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    }
+  },
+  "CameraDefaults": {
+    "CaptureSettings": [
+      {
+        "ImageType": 0,
+        "Width": 1280,
+        "Height": 720,
+        "FOV_Degrees": 90,
+        "AutoExposureSpeed": 100,
+        "AutoExposureMax": 2,
+        "AutoExposureMin": 0.02,
+        "MotionBlurAmount": 0
+      }
+    ]
+  },
+  "Recording": {
+    "RecordOnMove": false,
+    "RecordInterval": 0.05,
+    "Cameras": [
+      { "CameraName": "0", "ImageType": 0, "PixelsAsFloat": false, "Compress": true }
+    ]
+  }
+}

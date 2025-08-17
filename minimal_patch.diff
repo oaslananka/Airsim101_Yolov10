@@ -1,0 +1,226 @@
+# minimal_patch.diff
+
+diff --git a/detection/object_detection.py b/detection/object_detection.py
+index abc123..def456 100644
+--- a/detection/object_detection.py
++++ b/detection/object_detection.py
+@@ -1,33 +1,85 @@
+ # detection/object_detection.py
+ import airsim
+ import numpy as np
+ import cv2
++import time
++import logging
+ from ultralytics import YOLO
+ 
++# Configure logging
++logging.basicConfig(level=logging.INFO)
++logger = logging.getLogger(__name__)
++
+ model = YOLO("yolov10n.pt")
+ 
++def get_image_robust(client, camera="0", image_type=airsim.ImageType.Scene, retries=3, sleep_time=0.2, compress=True):
++    """
++    Robust image retrieval with retry mechanism. Fixes Issue #2.
++    
++    Args:
++        client: AirSim CarClient object
++        camera: Camera name/ID (default: "0" - more reliable than "FrontCenter")
++        image_type: Type of image to retrieve
++        retries: Number of retry attempts
++        sleep_time: Sleep time between retries
++        compress: Whether to use compression
++    
++    Returns:
++        np.ndarray or None: Decoded image or None if failed
++    """
++    for attempt in range(retries):
++        try:
++            if compress:
++                # Use simGetImages with compression - more reliable
++                response = client.simGetImages([airsim.ImageRequest(camera, image_type, False, True)])
++                if not response or len(response) == 0:
++                    raise Exception("Empty response from simGetImages")
++                img_data = response[0]
++                if img_data.image_data_uint8 is None or len(img_data.image_data_uint8) == 0:
++                    raise Exception("Empty image data")
++                nparr = np.frombuffer(img_data.image_data_uint8, np.uint8)
++                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
++            else:
++                # Fallback to original method
++                result = client.simGetImage(camera, image_type)
++                if result is None or len(result) == 0:
++                    raise Exception("Empty result from simGetImage")
++                raw_image = np.frombuffer(result, np.uint8)  # Fixed: uint8 instead of int8
++                img = cv2.imdecode(raw_image, cv2.IMREAD_UNCHANGED)
++            
++            if img is None or img.size == 0:
++                raise Exception("Failed to decode image")
++            
++            # Convert BGRA to BGR if necessary
++            if len(img.shape) == 3 and img.shape[2] == 4:
++                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
++            
++            return img
++        except Exception as e:
++            logger.warning(f"Image retrieval attempt {attempt + 1} failed: {str(e)}")
++            if attempt < retries - 1:
++                time.sleep(sleep_time)
++                if attempt == 0 and compress:
++                    compress = False  # Try uncompressed on next attempt
++    
++    logger.error(f"Failed to retrieve image after {retries} attempts")
++    return None
++
+ def yolov10_object_detection(client) -> bool:
+     """
+-    Perform object detection using YOLOv10 model.
++    Perform object detection using YOLOv10 model with robust image retrieval.
+ 
+     Args:
+         client: The AirSim client object.
+ 
+     Returns:
+         bool: True if the detection is successful, False otherwise.
+     """
+-    result = client.simGetImage("FrontCenter", airsim.ImageType.Scene)
+-    raw_image = np.frombuffer(result, np.int8)
+-    img = cv2.imdecode(raw_image, cv2.IMREAD_UNCHANGED)
++    # Use robust wrapper instead of direct simGetImage call
++    img = get_image_robust(client, camera="0", retries=3, sleep_time=0.2, compress=True)
+     
+-    if img.shape[2] == 4:
+-        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
++    if img is None:
++        logger.warning("Failed to retrieve image, skipping detection")
++        return True  # Continue operation
+ 
+-    results = model(img)
++    try:
++        results = model(img)
+ 
+-    for box in results[0].boxes:
+-        x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+-        label = model.names[int(box.cls[0].cpu().numpy())]
+-        confidence = box.conf[0].cpu().numpy()
++        if results and len(results) > 0 and hasattr(results[0], 'boxes') and results[0].boxes is not None:
++            for box in results[0].boxes:
++                try:
++                    x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
++                    cls_idx = int(box.cls[0].cpu().numpy())
++                    label = model.names[cls_idx] if cls_idx < len(model.names) else f"Unknown_{cls_idx}"
++                    confidence = float(box.conf[0].cpu().numpy())
+         
+-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+-        cv2.putText(img, f"{label} {confidence:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
++                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
++                    cv2.putText(img, f"{label} {confidence:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
++                except Exception as e:
++                    logger.warning(f"Error processing detection: {str(e)}")
++                    continue
++    except Exception as e:
++        logger.warning(f"YOLO detection failed: {str(e)}")
+ 
+-    cv2.imshow("Top", img)
++    cv2.imshow("YOLO Detection", img)
+ 
+     if cv2.waitKey(1) & 0xFF == ord('q'):
+         return False
+     return True
+
+diff --git a/core/main.py b/core/main.py
+index hij789..klm012 100644
+--- a/core/main.py
++++ b/core/main.py
+@@ -8,8 +8,12 @@ sys.path.append(str(parent_directory))
+ 
+ import threading
+ import airsim
++import time
++import logging
+ from config.coordinates import coordinates
+ from config.graph import graph
+ from core.astar import astar
+ from core.control import control_vehicle
+ 
++logging.basicConfig(level=logging.INFO)
++logger = logging.getLogger(__name__)
++
++def validate_airsim_connection(client, timeout=10.0):
++    """Validate AirSim connection before starting operations."""
++    try:
++        start_time = time.time()
++        logger.info("Validating AirSim connection...")
++        
++        while time.time() - start_time < timeout:
++            try:
++                client.getCarState()
++                # Test image API specifically (addresses Issue #2)
++                test_response = client.simGetImages([airsim.ImageRequest("0", airsim.ImageType.Scene, False, True)])
++                if test_response and len(test_response) > 0:
++                    logger.info("AirSim connection validated successfully")
++                    return True
++            except Exception as e:
++                logger.debug(f"Connection validation attempt failed: {str(e)}")
++                time.sleep(0.5)
++        
++        logger.error("AirSim connection validation timed out")
++        return False
++    except Exception as e:
++        logger.error(f"AirSim connection validation failed: {str(e)}")
++        return False
++
+ def main():
+     """
+-    The main function controls the execution flow of the program.
+-    It initializes the start and goal coordinates, finds the path using the A* algorithm,
+-    connects to the AirSim CarClient, controls the vehicle, and handles keyboard interrupts.
++    Main function with robust connection handling for Issue #2 fix.
+ 
+     Parameters:
+         None
+@@ -17,6 +39,7 @@ def main():
+     Returns:
+         None
+     """
++    logger.info("Starting Airsim101_Yolov10 application...")
+     start_coord = (0, 0)
+     goal_coord = (126, 126)
+ 
+@@ -24,14 +47,26 @@ def main():
+ 
+     client = airsim.CarClient()
+     client.confirmConnection()
++    
++    # Validate connection thoroughly (addresses Issue #2)
++    if not validate_airsim_connection(client, timeout=10.0):
++        logger.error("Failed to establish valid AirSim connection")
++        return
++    
+     client.enableApiControl(True)
+     client.reset()
+ 
+     car_controls = airsim.CarControls()
+     control_thread = threading.Thread(target=control_vehicle, args=(client, car_controls, path))
++    control_thread.daemon = True
+     control_thread.start()
+ 
+     try:
+         while control_thread.is_alive():
+             control_thread.join(0.1)
+-        print("The vehicle has reached the destination")
++        logger.info("The vehicle has reached the destination")
+     except KeyboardInterrupt:
+-        print("KeyboardInterrupt has been caught")
++        logger.info("KeyboardInterrupt received, shutting down gracefully...")
++    finally:
++        try:
++            car_controls.throttle = 0
++            car_controls.brake = 1
++            client.setCarControls(car_controls)
++            client.enableApiControl(False)
++        except Exception as e:
++            logger.warning(f"Error during cleanup: {str(e)}")
+ 
+ if __name__ == "__main__":
+     main()
