@@ -2,7 +2,7 @@
 
 This project demonstrates the control of an autonomous vehicle using A* pathfinding, sensor data integration, and object detection with YOLO. The system is designed to operate within a simulated environment provided by AirSim.
 
-[![test](assests/test.png)](assests/test.mp4)
+[![test](assets/test.png)](assets/test.mp4)
 
 ## Table of Contents
 
