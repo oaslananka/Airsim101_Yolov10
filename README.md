@@ -63,6 +63,24 @@ To set up the project, follow these steps:
 
 3. **Monitor Output**: The vehicle will start navigating the environment based on the defined path.
 
+## Configurations
+
+The project includes example AirSim configuration files to ensure optimal performance:
+
+- **`configs/settings.example.json`**: Pre-configured AirSim settings for car simulation
+- **`configs/README.md`**: Detailed setup guide and configuration explanations
+
+### Quick Configuration Setup
+
+1. Copy the example settings to your AirSim directory:
+   ```bash
+   cp configs/settings.example.json ~/Documents/AirSim/settings.json
+   ```
+
+2. Restart AirSim to apply the new settings
+
+For detailed configuration options and troubleshooting, see [`configs/README.md`](configs/README.md).
+
 ## Project Structure
 
 ```plaintext

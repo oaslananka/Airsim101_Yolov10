@@ -1,0 +1,199 @@
+diff --git a/detection/object_detection.py b/detection/object_detection.py
+index original..fixed 100644
+--- a/detection/object_detection.py
++++ b/detection/object_detection.py
+@@ -1,33 +1,39 @@
+ # detection/object_detection.py
+ import airsim
+ import numpy as np
+ import cv2
+ from ultralytics import YOLO
++from utils.robust_image import get_image_safe
+ 
+ model = YOLO("yolov10n.pt")
+ 
+ def yolov10_object_detection(client) -> bool:
+     """
+-    Perform object detection using YOLOv10 model.
++    Perform object detection using YOLOv10 model with robust image retrieval.
+ 
+     Args:
+         client: The AirSim client object.
+ 
+     Returns:
+         bool: True if the detection is successful, False otherwise.
+     """
+-    result = client.simGetImage("FrontCenter", airsim.ImageType.Scene)
+-    raw_image = np.frombuffer(result, np.int8)
+-    img = cv2.imdecode(raw_image, cv2.IMREAD_UNCHANGED)
++    # Use robust image retrieval instead of direct simGetImage call
++    img = get_image_safe(client, camera="0", retries=3, sleep=0.2, compress=True)
+     
++    if img is None:
++        return True  # Continue operation even if image retrieval fails
++    
+     if img.shape[2] == 4:
+         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+     results = model(img)
+
+     for box in results[0].boxes:
+         x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+         label = model.names[int(box.cls[0].cpu().numpy())]
+         confidence = box.conf[0].cpu().numpy()
+         
+         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+         cv2.putText(img, f"{label} {confidence:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+     cv2.imshow("Top", img)
+
+     if cv2.waitKey(1) & 0xFF == ord('q'):
+         return False
+     return True
+
+diff --git a/core/main.py b/core/main.py
+index original..fixed 100644
+--- a/core/main.py
++++ b/core/main.py
+@@ -8,8 +8,9 @@ sys.path.append(str(parent_directory))
+ 
+ import threading
+ import airsim
+ from config.coordinates import coordinates
+ from config.graph import graph
+ from core.astar import astar
+ from core.control import control_vehicle
++from utils.robust_image import validate_connection
+ 
+ def main():
+     """
+@@ -17,6 +18,8 @@ def main():
+     It initializes the start and goal coordinates, finds the path using the A* algorithm,
+     connects to the AirSim CarClient, controls the vehicle, and handles keyboard interrupts.
+
++    Enhanced with connection validation to prevent Issue #2.
++
+     Parameters:
+         None
+
+@@ -29,6 +32,11 @@ def main():
+
+     client = airsim.CarClient()
+     client.confirmConnection()
++    
++    # Validate connection before proceeding (fixes Issue #2)
++    if not validate_connection(client, timeout=10.0):
++        print("❌ Failed to validate AirSim connection")
++        return
+     client.enableApiControl(True)
+     client.reset()
+
+diff --git a/utils/robust_image.py b/utils/robust_image.py
+new file mode 100644
+index 0000000..abcdef1
+--- /dev/null
++++ b/utils/robust_image.py
+@@ -0,0 +1,150 @@
++# utils/robust_image.py
++"""
++Robust image retrieval wrapper for AirSim - Fixes Issue #2 'simGetImage' error.
++"""
++
++import airsim
++import numpy as np
++import cv2
++import time
++import logging
++from typing import Optional
++
++logger = logging.getLogger(__name__)
++
++class ImageRetrievalError(Exception):
++    """Custom exception for image retrieval failures."""
++    pass
++
++def get_image(client: airsim.CarClient, 
++              camera: str = "0", 
++              image_type: airsim.ImageType = airsim.ImageType.Scene,
++              retries: int = 3, 
++              sleep: float = 0.2, 
++              compress: bool = True) -> Optional[np.ndarray]:
++    """Robust image retrieval with retry mechanism and comprehensive error handling."""
++    
++    last_error = None
++    
++    for attempt in range(retries):
++        try:
++            # Method 1: Use simGetImages with compression (more reliable)
++            if compress:
++                response = client.simGetImages([
++                    airsim.ImageRequest(camera, image_type, False, True)
++                ])
++                
++                if not response or len(response) == 0:
++                    raise ImageRetrievalError("Empty response from simGetImages")
++                
++                img_data = response[0]
++                if img_data.image_data_uint8 is None or len(img_data.image_data_uint8) == 0:
++                    raise ImageRetrievalError("Empty image data in response")
++                
++                nparr = np.frombuffer(img_data.image_data_uint8, np.uint8)
++                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
++                
++            # Method 2: Use simGetImage without compression (fallback)
++            else:
++                result = client.simGetImage(camera, image_type)
++                
++                if result is None or len(result) == 0:
++                    raise ImageRetrievalError("Empty result from simGetImage")
++                
++                # FIX: use uint8 instead of int8
++                raw_image = np.frombuffer(result, np.uint8)
++                img = cv2.imdecode(raw_image, cv2.IMREAD_UNCHANGED)
++            
++            # Validate decoded image
++            if img is None or img.size == 0:
++                raise ImageRetrievalError("Failed to decode image")
++            
++            # Convert BGRA to BGR if necessary
++            if len(img.shape) == 3 and img.shape[2] == 4:
++                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
++            
++            return img
++            
++        except Exception as e:
++            last_error = e
++            if attempt < retries - 1:
++                time.sleep(sleep)
++                if attempt == 0 and compress:
++                    compress = False  # Switch strategy
++    
++    logger.error(f"Failed to retrieve image after {retries} attempts. Last error: {str(last_error)}")
++    return None
++
++def get_image_safe(client: airsim.CarClient, **kwargs) -> Optional[np.ndarray]:
++    """Safe wrapper that never raises exceptions - returns None on failure."""
++    try:
++        return get_image(client, **kwargs)
++    except Exception as e:
++        logger.error(f"Image retrieval failed: {str(e)}")
++        return None
++
++def validate_connection(client: airsim.CarClient, timeout: float = 5.0) -> bool:
++    """Validate AirSim connection is ready for image operations."""
++    try:
++        start_time = time.time()
++        
++        while time.time() - start_time < timeout:
++            try:
++                client.getCarState()
++                test_img = get_image(client, retries=1, sleep=0.1)
++                if test_img is not None:
++                    logger.info("AirSim connection and image API validated")
++                    return True
++            except Exception:
++                time.sleep(0.1)
++        
++        return False
++    except Exception:
++        return False
